@@ -16,9 +16,11 @@ ROWS = [  # id, ts, chat, sender, kind, text, filename, extra
 
 
 class Query(unittest.TestCase):
+    schema = index.SCHEMA
+
     def setUp(self):
         self.conn = sqlite3.connect(":memory:")
-        self.conn.executescript(index.SCHEMA)
+        self.conn.executescript(self.schema)
         self.conn.execute("ATTACH DATABASE ':memory:' AS tr")
         self.conn.executescript(index.TRANSCRIPTS_SCHEMA)
         search.register(self.conn)
@@ -74,6 +76,11 @@ class Query(unittest.TestCase):
         s = search.summary(self.conn, search.Query(chat_ids=[1]))
         self.assertEqual(s["total"], 2)
         self.assertEqual([r["id"] for r in search.around(self.conn, 2, 5, 5)], [1, 2])
+
+
+class QueryOnOldSqlite(Query):
+    """The same queries with the FTS table used on SQLite < 3.43."""
+    schema = index.SCHEMA.replace(index.FTS_OPTIONS, "tokenize='trigram', detail=none")
 
 
 if __name__ == "__main__":

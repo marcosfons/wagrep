@@ -5,7 +5,8 @@ snapshot. `ensure_fresh` brings it up to date when WhatsApp's database has
 changed: only rows whose Core Data change counter moved are decoded again.
 
 Size matters here, so text is stored once. The full-text table is a
-contentless trigram index without positions: it only narrows the candidates
+contentless trigram index without positions (on SQLite older than 3.43 it
+also holds a copy of the text): it only narrows the candidates
 (every trigram of a term must be present), and the real match is confirmed
 against `msgs.norm` (folded message text) or the compressed document text.
 
@@ -53,7 +54,12 @@ FULL_EVERY = 6 * 3600
 # Seconds a sync stays good before WhatsApp's changes are pulled again.
 TTL = float(os.environ.get("WAGREP_TTL", "15"))
 
-SCHEMA = """
+# Contentless FTS with deletes needs SQLite 3.43. Older ones (some Python
+# builds) keep a copy of the text in the FTS table: bigger, same results.
+FTS_OPTIONS = ("tokenize='trigram', content='', contentless_delete=1, detail=none"
+               if sqlite3.sqlite_version_info >= (3, 43)
+               else "tokenize='trigram', detail=none")
+SCHEMA = f"""
 CREATE TABLE meta(k TEXT PRIMARY KEY, v);
 CREATE TABLE chats(id INTEGER PRIMARY KEY, name TEXT, jid TEXT, kind TEXT,
                    archived INT, norm TEXT,
@@ -69,8 +75,7 @@ CREATE TABLE msgs(
   reply TEXT, reactions TEXT, extra TEXT);
 CREATE INDEX msgs_chat_ts ON msgs(chat_id, ts);
 CREATE INDEX msgs_ts ON msgs(ts);
-CREATE VIRTUAL TABLE fts USING fts5(
-  text, tokenize='trigram', content='', contentless_delete=1, detail=none);
+CREATE VIRTUAL TABLE fts USING fts5(text, {FTS_OPTIONS});
 CREATE TABLE docs(id INTEGER PRIMARY KEY, status TEXT, pages INT, chars INT,
                   text BLOB);       -- zlib-compressed UTF-8
 CREATE TABLE vocab(word TEXT PRIMARY KEY, n INT) WITHOUT ROWID;
@@ -206,10 +211,10 @@ def doc_text(blob) -> str | None:
 # --- connection ----------------------------------------------------------
 
 def connect() -> sqlite3.Connection:
-    if sqlite3.sqlite_version_info < (3, 43):
+    if sqlite3.sqlite_version_info < (3, 34):
         raise wa.SourceError(
-            f"SQLite {sqlite3.sqlite_version} is too old (needs 3.43+); "
-            "use a newer Python, e.g. brew install python")
+            f"SQLite {sqlite3.sqlite_version} is too old (needs 3.34+ for "
+            "trigram search); use a newer Python, e.g. brew install python")
     os.makedirs(wa.CACHE, mode=0o700, exist_ok=True)
     new = not os.path.exists(INDEX)
     conn = sqlite3.connect(INDEX, timeout=10)
