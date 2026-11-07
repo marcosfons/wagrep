@@ -9,7 +9,8 @@ people and AI agents. Python 3.9+, standard library only.
 ./wagrep -h                     # launcher; ~/.local/bin/wagrep is a symlink to it
 ./wagrep index                  # sync now, read pending documents, print status
 ./wagrep index --rebuild        # drop and rebuild the index (~1 min)
-python3 -m unittest -q          # unit tests (tests/, stdlib unittest)
+make check                      # unit tests (warnings as errors) + compile
+make install                    # symlink into ~/.local/bin
 -v                              # debug log, mirrored to stderr
 ```
 
@@ -108,5 +109,8 @@ code, tests, docs or commit messages: use fictional examples (Ana, Bruno,
   and why. **No `Co-Authored-By` or other attribution trailers.**
 - Remote: `git@github.com:marcosfons/wagrep.git` (public, SSH). `main` is
   pushed; never rewrite pushed history.
-- Releases: bump `VERSION` in `src/cli.py`, commit, tag `vX.Y.Z`, push the
-  tag, `gh release create vX.Y.Z` with notes.
+- CI (`.github/workflows/ci.yml`) runs `make check` on macOS with Python 3.9
+  and 3.13. Keep it green; 3.9 is the oldest supported version.
+- Releases: add the version to `CHANGELOG.md`, bump `VERSION` in
+  `src/cli.py`, commit, wait for CI, tag `vX.Y.Z`, push the tag, then
+  `gh release create vX.Y.Z --title "wagrep X.Y.Z" --notes-file <that section>`.

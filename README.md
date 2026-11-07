@@ -9,6 +9,14 @@
   that your AI agent can dig through it for you.
 </p>
 
+<p align="center">
+  <a href="https://github.com/marcosfons/wagrep/actions/workflows/ci.yml"><img src="https://github.com/marcosfons/wagrep/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="https://github.com/marcosfons/wagrep/releases/latest"><img src="https://img.shields.io/github/v/release/marcosfons/wagrep" alt="Latest release"></a>
+  <img src="https://img.shields.io/badge/macOS-WhatsApp%20Desktop-25d488" alt="macOS">
+  <img src="https://img.shields.io/badge/python-3.9%2B%2C%20no%20dependencies-3776ab" alt="Python 3.9+">
+  <a href="LICENSE"><img src="https://img.shields.io/github/license/marcosfons/wagrep" alt="MIT license"></a>
+</p>
+
 ---
 
 A lot of life happens in WhatsApp: the booking code a friend sent, the
@@ -58,13 +66,17 @@ $ wagrep "LA 3021" -s 30d
 
 ## Install
 
-Needs macOS with WhatsApp Desktop signed in, and Python 3.9+ (no packages).
+Needs macOS with WhatsApp Desktop signed in, and Python 3.9+ (the one macOS
+ships works; no packages).
 
 ```sh
-git clone git@github.com:marcosfons/wagrep.git ~/prog/wagrep
-ln -s ~/prog/wagrep/wagrep ~/.local/bin/wagrep
-wagrep index          # first run: builds the index (about a minute)
+git clone https://github.com/marcosfons/wagrep.git
+cd wagrep && make install   # symlinks wagrep into ~/.local/bin
+wagrep index                # first run: builds the index (about a minute)
 ```
+
+Update with `git pull` (the index upgrades itself when needed); remove with
+`make uninstall` and `rm -rf ~/.cache/wagrep`.
 
 Give your terminal **Full Disk Access** (System Settings > Privacy & Security),
 since WhatsApp's data lives in a protected container. Optional extras:
@@ -156,6 +168,14 @@ which 3-letter chunks each message contains. Logs go to `logs/wagrep.log`.
   same index.
 - **View-once media** is not identified in the database yet.
 
+## Privacy
+
+Everything stays on your Mac, and wagrep cannot change anything in WhatsApp.
+The only thing that ever leaves is a voice note you explicitly ask
+`wagrep transcribe` to send to an API you configured. Details and how to report
+a problem: [SECURITY.md](SECURITY.md).
+
 ## License
 
-[MIT](LICENSE). Not affiliated with WhatsApp or Meta.
+[MIT](LICENSE). Not affiliated with WhatsApp or Meta. Changes are listed in
+[CHANGELOG.md](CHANGELOG.md).
