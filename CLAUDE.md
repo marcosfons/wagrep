@@ -109,8 +109,9 @@ code, tests, docs or commit messages: use fictional examples (Ana, Bruno,
   and why. **No `Co-Authored-By` or other attribution trailers.**
 - Remote: `git@github.com:marcosfons/wagrep.git` (public, SSH). `main` is
   pushed; never rewrite pushed history.
-- CI (`.github/workflows/ci.yml`) runs `make check` on macOS with Python 3.9
-  and 3.13. Keep it green; 3.9 is the oldest supported version.
+- No CI, on purpose: checks run here. Before a commit run `make check`; before
+  a release also `make check PYTHON=/usr/bin/python3` (macOS's Python 3.9,
+  the oldest supported).
 - Releases: add the version to `CHANGELOG.md`, bump `VERSION` in
-  `src/cli.py`, commit, wait for CI, tag `vX.Y.Z`, push the tag, then
+  `src/cli.py`, run both checks above, commit, tag `vX.Y.Z`, push the tag, then
   `gh release create vX.Y.Z --title "wagrep X.Y.Z" --notes-file <that section>`.

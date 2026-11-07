@@ -10,7 +10,6 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/marcosfons/wagrep/actions/workflows/ci.yml"><img src="https://github.com/marcosfons/wagrep/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
   <a href="https://github.com/marcosfons/wagrep/releases/latest"><img src="https://img.shields.io/github/v/release/marcosfons/wagrep" alt="Latest release"></a>
   <img src="https://img.shields.io/badge/macOS-WhatsApp%20Desktop-25d488" alt="macOS">
   <img src="https://img.shields.io/badge/python-3.9%2B%2C%20no%20dependencies-3776ab" alt="Python 3.9+">
