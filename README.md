@@ -47,6 +47,9 @@ $ wagrep "LA 3021" -s 30d
 - **Shows what the app shows.** Who replied to what, reactions, edits, polls
   with vote counts, deleted messages, business messages, locations, and every
   attachment's type, length, size and page count.
+- **Voice notes, on demand.** `wagrep transcribe <id>` turns a voice note
+  into searchable text with Whisper. It never runs on its own, so an agent
+  transcribes only the notes that matter.
 - **One id for everything.** Each message prints as `#id`;
   `wagrep ctx/show/open/path <id>` takes it from there.
 - **Read-only by construction.** WhatsApp's database is never opened, only
@@ -84,6 +87,42 @@ since WhatsApp's data lives in a protected container. Optional extras:
 
 `wagrep -h` lists every flag; `wagrep guide` is the reference written for agents.
 
+## Index only what you care about
+
+By default everything is indexed (about 100 MB for 330k messages). Most of
+that is old history you rarely search, so you can keep recent messages and
+choose which chats keep their past:
+
+```sh
+wagrep index --default 60d --archived skip   # last 2 months, archived chats out
+wagrep chats --keep "Ana"                    # this chat's full history
+wagrep chats --keep "Book club" --span 1y    # or a year of it
+wagrep chats --skip "Promotions"             # never index this one
+```
+
+That brought one real index from 104 MB to 26 MB. Rules live in
+`~/.config/wagrep/config.ini`; old messages leave the index as they age past
+the window. When a search reaches outside what is indexed, wagrep says so and
+prints the `--keep` command, so nothing silently looks like "never said".
+
+## Voice notes
+
+Transcription is opt-in and explicit: nothing is sent anywhere until you (or
+your agent) ask for specific messages. Pick one backend:
+
+```sh
+wagrep transcribe --setup api --url https://api.openai.com/v1 --key sk-...
+        # or Groq, or your own OpenAI-compatible Whisper server
+wagrep transcribe --setup local --language pt
+        # faster-whisper on this Mac: ~2 GB download, needs Python 3.10-3.13 and ffmpeg
+```
+
+Then `wagrep transcribe 381110 381131`. Transcripts are kept in
+`~/.local/share/wagrep`, show up inline as `(transcript) ...`, and are
+searchable like any message. Add a `prompt = ...` line under `[whisper]` in
+`~/.config/wagrep/config.ini` with a sentence in your language and the names
+you use: Whisper copies its spelling and style.
+
 ## Teach your agent
 
 Add this to your `CLAUDE.md` (or `AGENTS.md`). It costs a few dozen tokens:
@@ -92,7 +131,8 @@ Add this to your `CLAUDE.md` (or `AGENTS.md`). It costs a few dozen tokens:
 - **`wagrep`**: my WhatsApp history, read-only. Use it when context may live in
   chats (people, decisions, codes, files sent). `wagrep chats NAME`, then
   `wagrep TERMS -c CHAT -s 7d`; `#ID`s feed `ctx`/`show`/`open`/`path`.
-  Follow the stderr hints to narrow. Details: `wagrep guide`.
+  Follow the stderr hints to narrow. Voice notes: `wagrep transcribe ID...`
+  only when one matters (slow, may cost money). Details: `wagrep guide`.
 ```
 
 ## How it works
@@ -114,7 +154,6 @@ which 3-letter chunks each message contains. Logs go to `logs/wagrep.log`.
   stores (WhatsApp Web in encrypted IndexedDB), so they need their own reader.
   Only `src/wa.py` knows about the macOS database; another source fills the
   same index.
-- **Voice note transcription**, to search what was said, not only written.
 - **View-once media** is not identified in the database yet.
 
 ## License

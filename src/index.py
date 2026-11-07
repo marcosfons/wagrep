@@ -16,6 +16,7 @@ rebuilds it from scratch on the next run instead of migrating.
 from __future__ import annotations
 
 import collections
+import configparser
 import fcntl
 import json
 import logging
@@ -34,7 +35,17 @@ from . import content, wa
 log = logging.getLogger("wagrep.index")
 
 INDEX = os.path.join(wa.CACHE, "index.db")
-SCHEMA_VERSION = 2
+# Transcripts cost time or money, so they live outside the rebuildable cache.
+DATA_DIR = os.environ.get("WAGREP_DATA") or os.path.join(
+    os.environ.get("XDG_DATA_HOME") or os.path.expanduser("~/.local/share"), "wagrep")
+TRANSCRIPTS = os.path.join(DATA_DIR, "transcripts.db")
+TRANSCRIPTS_SCHEMA = """
+CREATE TABLE IF NOT EXISTS tr.transcripts(
+  id INTEGER PRIMARY KEY,           -- msgs.id of the voice note
+  text TEXT, norm TEXT, language TEXT, confidence REAL,
+  backend TEXT, model TEXT, took REAL, created REAL);
+"""
+SCHEMA_VERSION = 3
 # Re-check this many of the newest rows on every sync (edits, reactions and
 # downloads mostly touch recent messages); everything else every FULL_EVERY.
 RECENT_ROWS = 20000
@@ -45,7 +56,9 @@ TTL = float(os.environ.get("WAGREP_TTL", "15"))
 SCHEMA = """
 CREATE TABLE meta(k TEXT PRIMARY KEY, v);
 CREATE TABLE chats(id INTEGER PRIMARY KEY, name TEXT, jid TEXT, kind TEXT,
-                   archived INT, norm TEXT);
+                   archived INT, norm TEXT,
+                   scope TEXT,       -- rule label: all, skip, 60d, 1y, ...
+                   since REAL);      -- oldest indexed time; NULL = everything
 CREATE TABLE msgs(
   id INTEGER PRIMARY KEY,           -- ZWAMESSAGE.Z_PK
   sig INTEGER,                      -- Core Data change counters
@@ -68,6 +81,74 @@ COLUMNS = ("id", "sig", "ts", "chat_id", "sender", "from_me", "kind", "text",
 JSON_COLUMNS = ("reply", "reactions", "extra")
 INSERT = (f"INSERT OR REPLACE INTO msgs ({','.join(COLUMNS)}) "
           f"VALUES ({','.join('?' * len(COLUMNS))})")
+
+
+# --- preferences -------------------------------------------------------
+# ~/.config/wagrep/config.ini holds user preferences: [whisper] for
+# transcription, [scope] and [chats] for how much history gets indexed.
+
+CONFIG = os.path.join(os.environ.get("XDG_CONFIG_HOME")
+                      or os.path.expanduser("~/.config"), "wagrep", "config.ini")
+_SPAN = re.compile(r"^(\d+)\s*(d|w|m|mo|y)$")
+_SPAN_SECONDS = {"d": 86400, "w": 7 * 86400, "m": 30 * 86400, "mo": 30 * 86400,
+                 "y": 365 * 86400}
+
+
+def _parser() -> configparser.ConfigParser:
+    parser = configparser.ConfigParser(inline_comment_prefixes=("#",))
+    parser.optionxform = str  # chat JIDs are keys; keep them verbatim
+    parser.read(CONFIG)
+    return parser
+
+
+def load_config(section: str) -> dict:
+    parser = _parser()
+    return dict(parser[section]) if parser.has_section(section) else {}
+
+
+def save_config(section: str, values: dict):
+    """Set (or, with None, remove) keys in one section; the file stays 0600."""
+    parser = _parser()
+    if not parser.has_section(section):
+        parser.add_section(section)
+    for key, value in values.items():
+        if value is None:
+            parser.remove_option(section, key)
+        else:
+            parser.set(section, key, str(value))
+    os.makedirs(os.path.dirname(CONFIG), mode=0o700, exist_ok=True)
+    fd = os.open(CONFIG, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as fh:
+        parser.write(fh)
+
+
+def parse_span(text: str) -> float | str:
+    """"all", "skip", or a span like 60d / 2w / 6m / 1y in seconds."""
+    value = text.strip().lower()
+    if value in ("all", "skip"):
+        return value
+    match = _SPAN.match(value)
+    if not match:
+        raise ValueError(f"{text!r} is not all, skip or a span like 60d, 6m, 1y")
+    return int(match.group(1)) * _SPAN_SECONDS[match.group(2)]
+
+
+def chat_scopes(chats: list[dict], now: float) -> dict[int, tuple]:
+    """chat id -> (rule label, oldest time to index: None = all, inf = none).
+
+    A rule for the chat in [chats] wins; otherwise archived chats follow
+    [scope] archived and the rest [scope] default. Both default to all."""
+    scope = load_config("scope")
+    rules = load_config("chats")
+    default = scope.get("default", "all")
+    archived = scope.get("archived", default)
+    out = {}
+    for chat in chats:
+        label = rules.get(chat["jid"] or "") or (archived if chat["archived"] else default)
+        span = parse_span(label)
+        since = None if span == "all" else float("inf") if span == "skip" else now - span
+        out[chat["id"]] = (label.strip().lower(), since)
+    return out
 
 
 # --- text ----------------------------------------------------------------
@@ -152,6 +233,9 @@ def connect() -> sqlite3.Connection:
         with conn:
             conn.executescript(SCHEMA)
             conn.execute("INSERT INTO meta VALUES ('schema', ?)", (SCHEMA_VERSION,))
+    os.makedirs(DATA_DIR, mode=0o700, exist_ok=True)
+    conn.execute("ATTACH DATABASE ? AS tr", (TRANSCRIPTS,))
+    conn.executescript(TRANSCRIPTS_SCHEMA)
     return conn
 
 
@@ -218,7 +302,13 @@ def sync(conn, sig, full=False, progress=False, doc_budget=2.0):
         full = full or first or time.time() - last_full > FULL_EVERY
         after = 0 if full else max(0, max_pk - RECENT_ROWS)
 
-        src_sigs = wa.signatures(src, after)
+        scopes = chat_scopes(chats, time.time())
+        rules = json.dumps([load_config("scope"), load_config("chats")], sort_keys=True)
+        if meta(conn, "scope") != rules:
+            # Scope changed: reconcile everything (backfill or prune).
+            full, after = True, 0
+        src_sigs = {pk: sig for pk, (sig, chat, ts) in wa.signatures(src, after).items()
+                    if ts >= (scopes.get(chat, (None, None))[1] or 0)}
         idx_sigs = dict(conn.execute(
             "SELECT id, sig FROM msgs WHERE id > ?", (after,)))
         changed = [pk for pk, s in src_sigs.items() if idx_sigs.get(pk) != s]
@@ -227,9 +317,9 @@ def sync(conn, sig, full=False, progress=False, doc_budget=2.0):
         with conn:
             conn.execute("DELETE FROM chats")
             conn.executemany(
-                "INSERT INTO chats VALUES (?, ?, ?, ?, ?, ?)",
+                "INSERT INTO chats VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                 [(c["id"], c["name"], c["jid"], c["kind"], c["archived"],
-                  fold(c["name"])) for c in chats])
+                  fold(c["name"]), *scopes[c["id"]]) for c in chats])
             for chunk in _chunks(deleted, 500):
                 holes = ",".join("?" * len(chunk))
                 for table in ("msgs", "fts", "docs"):
@@ -243,6 +333,7 @@ def sync(conn, sig, full=False, progress=False, doc_budget=2.0):
                 words.items())
             set_meta(conn, "src_sig", sig)
             set_meta(conn, "synced_at", time.time())
+            set_meta(conn, "scope", rules)
             if full:
                 set_meta(conn, "full_at", time.time())
     finally:
@@ -254,6 +345,13 @@ def sync(conn, sig, full=False, progress=False, doc_budget=2.0):
     if first:
         conn.execute("INSERT INTO fts(fts) VALUES ('optimize')")
         conn.commit()
+    free = conn.execute("PRAGMA freelist_count").fetchone()[0]
+    pages = conn.execute("PRAGMA page_count").fetchone()[0]
+    if free * 4096 > 20e6 or free > pages / 4:
+        # Pruning (a narrower scope, old messages leaving the window) frees
+        # pages SQLite would otherwise keep; give the disk space back.
+        conn.execute("VACUUM")
+        log.info("vacuumed %d free pages", free)
     log.info("sync: %s, %d changed, %d deleted, snapshot %.2fs, total %.2fs%s",
              "full" if full else f"after #{after}", len(changed), len(deleted),
              t_snap, time.time() - t0,
@@ -298,12 +396,15 @@ def _write(conn, src, names, msgs, src_sigs, idx_sigs, words):
         return
     _name_reply_authors(src, names, msgs)
     ids = [m["id"] for m in msgs]
-    docs = {}
-    if idx_sigs:
-        for chunk in _chunks(ids, 500):
+    docs, spoken = {}, {}
+    for chunk in _chunks(ids, 500):
+        holes = ",".join("?" * len(chunk))
+        if idx_sigs:
             docs.update(conn.execute(
-                f"SELECT id, text FROM docs WHERE status = 'ok' "
-                f"AND id IN ({','.join('?' * len(chunk))})", chunk))
+                f"SELECT id, text FROM docs WHERE status = 'ok' AND id IN ({holes})",
+                chunk))
+        spoken.update(conn.execute(
+            f"SELECT id, norm FROM tr.transcripts WHERE id IN ({holes})", chunk))
     records, texts = [], []
     for msg in msgs:
         msg["sig"] = src_sigs[msg["id"]]
@@ -312,6 +413,8 @@ def _write(conn, src, names, msgs, src_sigs, idx_sigs, words):
             words.update(WORD.findall(body))
         if msg["id"] in docs:
             body += "\n" + fold(doc_text(docs[msg["id"]]))
+        if msg["id"] in spoken:
+            body += "\n" + spoken[msg["id"]]
         records.append(tuple(
             json.dumps(msg[c], ensure_ascii=False, separators=(",", ":"))
             if c in JSON_COLUMNS and msg.get(c) else msg.get(c)
@@ -394,6 +497,21 @@ def read_documents(conn, budget: float | None, progress=False) -> int:
         if progress and done % 100 == 0:
             print(f"  {done}/{len(todo)} documents", file=sys.stderr)
     return len(todo) - done
+
+
+def save_transcript(conn, msg_id: int, result: dict, backend: str, took: float):
+    """Store a transcript and make it searchable right away."""
+    norm = fold(result["text"])
+    with conn:
+        conn.execute("INSERT OR REPLACE INTO tr.transcripts VALUES (?,?,?,?,?,?,?,?,?)",
+                     (msg_id, result["text"], norm, result.get("language"),
+                      result.get("confidence"), backend, result.get("model"),
+                      took, time.time()))
+        body = conn.execute("SELECT norm FROM msgs WHERE id = ?",
+                            (msg_id,)).fetchone()[0] or ""
+        conn.execute("DELETE FROM fts WHERE rowid = ?", (msg_id,))
+        conn.execute("INSERT INTO fts (rowid, text) VALUES (?, ?)",
+                     (msg_id, body + "\n" + norm))
 
 
 def rebuild():

@@ -16,7 +16,7 @@ import subprocess
 import sys
 import time
 
-from . import index, render, search, wa
+from . import index, render, search, transcribe, wa
 
 ROOT = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
 LAUNCHER = os.path.join(ROOT, "wagrep")
@@ -43,6 +43,7 @@ commands (default: search):
   wagrep path ID...            absolute path of attachments
   wagrep stats [filters]       counts by chat/sender/type/day, no messages
   wagrep pick [filters]        interactive fuzzy finder (fzf)
+  wagrep transcribe ID...      transcribe voice notes (explicit; may cost money)
   wagrep sql "SELECT ..."      read-only SQL on the index (see: wagrep guide)
   wagrep index [--rebuild]     sync now, read all documents, show status
   wagrep guide                 reference for agents: output, JSON, schema"""
@@ -221,9 +222,33 @@ def build_query(conn, args) -> search.Query:
         if fuzzy:
             note(f"no chat named {', '.join(map(repr, patterns))}; using "
                  + ", ".join(c[1] for c in chats[:5]))
+        scopes = {cid: (scope, since, archived) for cid, scope, since, archived in conn.execute(
+            f"SELECT id, scope, since, archived FROM chats WHERE id IN "
+            f"({','.join(str(c[0]) for c in chats)})")}
+        hidden = [c for c in chats if scopes[c[0]][1] == float("inf")]
+        if hidden:
+            names = ", ".join(c[1] for c in hidden[:5])
+            why = "archived" if all(scopes[c[0]][2] for c in hidden) else "scope: skip"
+            hint = (f"not indexed ({why}): {names}\n"
+                    f"  To search it: wagrep chats --keep {shlex.quote(hidden[0][1])} [--span 1y]")
+            if len(hidden) == len(chats):
+                raise search.QueryError(hint)
+            note(hint)
+        windowed = [(c[1], scopes[c[0]]) for c in chats
+                    if scopes[c[0]][1] not in (None, float("inf"))]
+        if windowed:
+            name, (label, since, _) = windowed[0]
+            q.scope_hint = (f"{name}: only messages since {render.local(since):%Y-%m-%d} "
+                            f"are indexed ({label}); more: wagrep chats --keep "
+                            f"{shlex.quote(name)} [--span 1y]")
         ids = [c[0] for c in chats]
         q.chat_ids = ids if q.chat_ids is None else \
             [i for i in q.chat_ids if i in set(ids)]
+    default = index.load_config("scope").get("default", "all")
+    if q.chat_ids is None and default != "all":
+        q.window_start = time.time() - index.parse_span(default)
+        q.scope_hint = (f"only the last {default} are indexed, plus chats kept in full "
+                        "(wagrep chats --keep NAME [--span 1y] for older history)")
     if args.day:
         q.since = search.parse_when(args.day, "-d/--day")
         q.until = search.day_after(q.since)
@@ -271,6 +296,10 @@ def cmd_search(args) -> int:
             alternatives = "; ".join(f"{t} -> {' '.join(w)}"
                                      for t, w in q.expansions.items() if len(w) > 1)
             note(f"no exact match; typo-tolerant: {alternatives}")
+    reaches_back = (q.since is not None and q.window_start is not None
+                    and q.since < q.window_start)
+    if q.scope_hint and (not rows or (len(rows) == total and (q.chat_ids or reaches_back))):
+        note(q.scope_hint)
     if not rows:
         note("no matches" + (" (in " + ", ".join(
             r[0] for r in conn.execute(
@@ -364,14 +393,17 @@ def list_matching_chats(conn, q, args) -> int:
     return 0
 
 
-def print_chat_rows(rows, label):
+def print_chat_rows(rows, label, scopes=None):
+    """rows: (name, kind, count, last ts); scopes: scope label per row."""
     if not rows:
         note("no chats")
         return
-    print(f"{'last':<10}  {'kind':<7} {label:>8}  name")
-    for name, kind, n, last in rows:
+    scope_head = f"{'scope':<6} " if scopes else ""
+    print(f"{'last':<10}  {'kind':<7} {label:>8}  {scope_head}name")
+    for i, (name, kind, n, last) in enumerate(rows):
         day = render.local(last).strftime("%Y-%m-%d") if last else "-"
-        print(f"{day:<10}  {kind:<7} {n:>8,}  {name}")
+        scope = f"{scopes[i]:<6} " if scopes else ""
+        print(f"{day:<10}  {kind:<7} {n:>8,}  {scope}{name}")
 
 
 def extract(msgs, dest) -> int:
@@ -401,6 +433,8 @@ def extract(msgs, dest) -> int:
 
 def cmd_chats(args) -> int:
     conn = open_index(args)
+    if args.keep or args.skip or args.reset:
+        return set_scope(conn, args)
     counts = {cid: (n, last) for cid, n, last in conn.execute(
         "SELECT chat_id, COUNT(*), MAX(ts) FROM msgs WHERE kind != 'system' "
         "GROUP BY chat_id")}
@@ -410,11 +444,37 @@ def cmd_chats(args) -> int:
             note("no exact name match; typo-tolerant results")
     else:
         chats = conn.execute("SELECT id, name, jid, kind, norm FROM chats").fetchall()
-    rows = sorted(((c[1], c[3], *counts.get(c[0], (0, None))) for c in chats),
-                  key=lambda r: r[3] or 0, reverse=True)
+    scope = dict(conn.execute("SELECT id, scope FROM chats"))
+    rows = sorted(((c[1], c[3], *counts.get(c[0], (0, None)), scope.get(c[0]) or "all")
+                   for c in chats), key=lambda r: r[3] or 0, reverse=True)
     if args.limit:
         rows = rows[:args.limit]
-    print_chat_rows(rows, "messages")
+    print_chat_rows([r[:4] for r in rows], "indexed", [r[4] for r in rows])
+    return 0
+
+
+def set_scope(conn, args) -> int:
+    """Per-chat index rules ([chats] in the config), applied by a sync now."""
+    if not args.names:
+        raise search.QueryError("name the chat(s): wagrep chats --keep NAME")
+    chats, _ = search.find_chats(conn, args.names)
+    if not chats:
+        raise search.QueryError(f"no chat matches {', '.join(map(repr, args.names))}")
+    if len(chats) > 5:
+        raise search.QueryError(
+            f"{len(chats)} chats match, be more specific: "
+            + ", ".join(c[1] for c in chats[:8]))
+    rule = "skip" if args.skip else args.span if args.keep else None
+    if rule:
+        try:
+            index.parse_span(rule)
+        except ValueError as exc:
+            raise search.QueryError(f"--span: {exc}") from None
+    index.save_config("chats", {c[2]: None if rule is None else f"{rule}  # {c[1]}"
+                                for c in chats})
+    for c in chats:
+        note(f"{c[1]}: {rule or 'back to the default scope'}")
+    index.ensure_fresh(conn, force=True)
     return 0
 
 
@@ -525,6 +585,10 @@ def cmd_show(args) -> int:
             print(f"disappearing after {j['ephemeral'] // 86400} day(s)")
         if j.get("text"):
             print("\n" + j["text"])
+        if j.get("transcript"):
+            print("\ntranscript: " + j["transcript"])
+        elif msg["kind"] in wa.SPEECH_KINDS:
+            print(f"\nnot transcribed: wagrep transcribe {j['id']}")
         doc = renderer.doc(msg["id"])
         if doc and doc[2]:
             full = index.doc_text(doc[2])
@@ -538,6 +602,83 @@ def cmd_show(args) -> int:
     return 0
 
 
+def cmd_transcribe(args) -> int:
+    if args.setup == "api":
+        if not args.url:
+            raise search.QueryError("--setup api needs --url (e.g. https://api.openai.com/v1)")
+        transcribe.setup_api(args.url, args.key, args.model, args.language)
+        note(f"transcription via {args.url} saved to {index.CONFIG}")
+        return 0
+    if args.setup == "local":
+        transcribe.setup_local(index.DATA_DIR, args.model, args.language)
+        note(f"local transcription ready; settings in {index.CONFIG}")
+        return 0
+    cfg = transcribe.load_config()
+    for key in ("model", "language"):
+        if getattr(args, key):
+            cfg[key] = getattr(args, key)
+    conn = open_index(args, sync=False)
+    if not args.targets:
+        return transcribe_status(conn, cfg)
+
+    renderer = render.Renderer(conn, render.Style(sys.stdout.isatty()), full=True)
+    jobs, ready = [], []
+    for row in resolve_targets(conn, args.targets):
+        msg = index.row_dict(row)
+        if msg["kind"] not in wa.SPEECH_KINDS and not (
+                msg.get("mime") or "").startswith(("audio/", "video/")):
+            raise search.QueryError(f"#{msg['id']} is a {msg['kind']} message, "
+                                    "not a voice note or video")
+        path = _existing_path(row)
+        if renderer.transcript(msg) and not args.force:
+            ready.append(msg)
+            continue
+        jobs.append({"id": msg["id"], "path": path, "kind": msg["kind"],
+                     "duration": msg.get("duration"), "msg": msg,
+                     "prompt": transcribe.build_prompt(conn, msg, cfg)})
+    for msg in ready:
+        renderer.text([msg], [renderer.lines(msg)])
+    if not jobs:
+        return 0
+    audio = sum(j["duration"] or 0 for j in jobs)
+    note(f"transcribing {len(jobs)} voice note(s), {render.human_duration(audio)} "
+         f"of audio, via {cfg.get('backend') or '?'}...")
+    start, failed = time.time(), 0
+    for job, result in transcribe.run(index.DATA_DIR, jobs, cfg):
+        if isinstance(result, transcribe.TranscribeError):
+            failed += 1
+            log.warning("transcription of #%s failed: %s", job["id"], result)
+            note(f"#{job['id']}: {result}")
+            continue
+        index.save_transcript(conn, job["id"], result, cfg["backend"], result["took"])
+        log.info("transcribed #%s: %ss audio in %.1fs via %s (%s)", job["id"],
+                 job["duration"], result["took"], cfg["backend"], result.get("model"))
+        renderer.text([job["msg"]], [renderer.lines(job["msg"])])
+    note(f"done in {time.time() - start:.1f}s"
+         + (f"; {failed} failed (details above and in {LOG_FILE})" if failed else ""))
+    return 2 if failed else 0
+
+
+def transcribe_status(conn, cfg) -> int:
+    n, audio = conn.execute(
+        "SELECT COUNT(*), COALESCE(SUM(m.duration), 0) FROM tr.transcripts t "
+        "JOIN msgs m ON m.id = t.id").fetchone()
+    backend = cfg.get("backend")
+    print(f"backend:     {backend or 'not configured (wagrep transcribe --setup api|local)'}")
+    if backend == "api":
+        print(f"url:         {cfg.get('url')}")
+        print(f"key:         {'set' if cfg.get('key') else 'none'}")
+    if backend == "local":
+        ready = os.path.exists(transcribe.venv_python(index.DATA_DIR))
+        print(f"virtualenv:  {'ready' if ready else 'missing, rerun --setup local'}")
+    if backend:
+        print(f"model:       {cfg.get('model')}   language: {cfg.get('language') or 'auto'}")
+    print(f"transcripts: {n:,} ({render.human_duration(audio) or '0:00'} of audio) "
+          f"in {index.TRANSCRIPTS}")
+    print(f"config:      {index.CONFIG}")
+    return 0
+
+
 def cmd_stats(args) -> int:
     conn = open_index(args)
     q = build_query(conn, args)
@@ -546,6 +687,14 @@ def cmd_stats(args) -> int:
 
 
 def cmd_index(args) -> int:
+    for key in ("default", "archived"):
+        value = getattr(args, key)
+        if value:
+            try:
+                index.parse_span(value)
+            except ValueError as exc:
+                raise search.QueryError(f"--{key}: {exc}") from None
+            index.save_config("scope", {key: value.strip().lower()})
     if args.rebuild:
         conn = index.rebuild()
     else:
@@ -568,6 +717,14 @@ def cmd_index(args) -> int:
           + ("" if shutil.which("pdftotext") else
              "  (install poppler for PDF text: brew install poppler)"))
     print(f"synced:    {render.local(synced):{fmt}:%S} (full check {render.local(full):{fmt}})")
+    scope = index.load_config("scope")
+    kept = conn.execute("SELECT COUNT(*) FROM chats WHERE since IS NULL").fetchone()[0]
+    skipped = conn.execute(
+        "SELECT COUNT(*) FROM chats WHERE since > 1e300").fetchone()[0]
+    print(f"scope:     default {scope.get('default', 'all')}, archived "
+          f"{scope.get('archived', scope.get('default', 'all'))}; {kept} chats in full, "
+          f"{skipped} not indexed (wagrep chats --keep/--skip NAME)")
+    print(f"config:    {index.CONFIG}")
     print(f"log:       {LOG_FILE}")
     return 0
 
@@ -637,6 +794,7 @@ OUTPUT (text)
   *#381102 ...                      the hit, in --ctx / ctx output
   [CHAT] before the sender          when results span several chats
   [video 0:11 2.1M] [audio 0:42 81K] [document a.pdf 3p 1.2M] [poll: A 3, B 1]
+  (transcript) text             what a transcribed voice note says
   "not downloaded" inside [...]     attachment not on this Mac
   > Name: quoted text               the message replied to
   (edited 15:49)                    edited (only edits from this account are known)
@@ -668,11 +826,23 @@ SQL (wagrep sql, read-only, on ~/.cache/wagrep/index.db)
   functions: doctext(docs.text) -> document text, fold(x) -> lowercase unaccented
   e.g. wagrep sql "SELECT kind, COUNT(*) FROM msgs GROUP BY 1"
 
+SCOPE
+  The user may index only part of the history (wagrep index shows it). When
+  a search reaches outside it, stderr says so and gives the command, e.g.
+  wagrep chats --keep NAME [--span 1y]. Run it when the user wants that
+  chat's older messages; wagrep chats lists each chat's scope.
+
 LIMITS
   Read-only snapshot of WhatsApp Desktop (macOS). Cannot send or modify.
   Deleted messages show as [deleted] (content is gone). Edits keep only the
   new text. View-once media and messages never synced to this Mac are absent.
-  Voice notes are not transcribed.
+  Voice notes are transcribed only on request.
+
+TRANSCRIPTION (explicit; takes ~1/4 of the audio length and may cost money)
+  wagrep transcribe ID...       transcribe these voice notes/videos; cached
+  Transcripts then show inline as "(transcript) ..." and are searchable.
+  Transcribe only the notes you need (find them with -T audio, -k, ctx).
+  wagrep transcribe             shows whether a backend is configured.
 """
 
 
@@ -692,6 +862,12 @@ def subparsers(common, filters):
     c = p["chats"] = make("chats", "find chats by name (typo-tolerant)")
     c.add_argument("names", nargs="*")
     c.add_argument("-n", "--limit", type=int, default=30, help="default 30, 0 = all")
+    g = c.add_argument_group("how much of a chat to index (saved in the config)")
+    g.add_argument("--keep", action="store_true",
+                   help="index its history: all, or --span 1y")
+    g.add_argument("--span", default="all", help="with --keep: all, 60d, 6m, 1y, ...")
+    g.add_argument("--skip", action="store_true", help="never index it")
+    g.add_argument("--reset", action="store_true", help="back to the default scope")
     for name, help_text in (("open", "open attachments with the default app"),
                             ("path", "print absolute paths of attachments"),
                             ("show", "every detail of messages")):
@@ -713,8 +889,23 @@ def subparsers(common, filters):
                      (filters, common))
     s = p["sql"] = make("sql", "read-only SQL on the index (wagrep guide)")
     s.add_argument("query")
+    t = p["transcribe"] = make(
+        "transcribe", "transcribe voice notes by id; never runs on its own. "
+        "With no ids: show the configuration.")
+    t.add_argument("targets", nargs="*", metavar="ID|PATH")
+    t.add_argument("--force", action="store_true", help="transcribe again")
+    t.add_argument("--setup", choices=("api", "local"),
+                   help="api: any OpenAI-compatible endpoint; local: faster-whisper here")
+    t.add_argument("--url", help="API base url, e.g. https://api.openai.com/v1")
+    t.add_argument("--key", help="API key")
+    t.add_argument("--model", help="model name (api default whisper-1, local large-v3-turbo)")
+    t.add_argument("--language", help="pt, en, ... or auto")
     i = p["index"] = make("index", "sync now, read all documents, print status")
     i.add_argument("--rebuild", action="store_true", help="drop and rebuild")
+    i.add_argument("--default", metavar="SPAN",
+                   help="history to index for chats without a rule: all, 60d, 6m, 1y")
+    i.add_argument("--archived", metavar="SPAN",
+                   help="same for archived/hidden chats: skip, all or a span")
     p["guide"] = make("guide", "reference for agents")
     return p
 
@@ -722,6 +913,7 @@ def subparsers(common, filters):
 COMMANDS = {"chats": cmd_chats, "open": cmd_open, "path": cmd_path,
             "show": cmd_show, "ctx": cmd_ctx, "stats": cmd_stats,
             "pick": cmd_pick, "sql": cmd_sql, "index": cmd_index,
+            "transcribe": cmd_transcribe,
             "guide": cmd_guide}
 
 
@@ -745,7 +937,7 @@ def main(argv=None) -> int:
         log.info("%s %s -> exit %d in %.3fs", name, shlex.join(argv), code,
                  time.time() - start)
         return code
-    except (wa.SourceError, search.QueryError) as exc:
+    except (wa.SourceError, search.QueryError, transcribe.TranscribeError) as exc:
         log.warning("%s %s -> %s", name, shlex.join(argv), exc)
         print(f"wagrep: {exc}", file=sys.stderr)
         return 2

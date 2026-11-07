@@ -92,6 +92,13 @@ class Renderer:
                 (msg_id,)).fetchone()
         return self._docs[msg_id]
 
+    def transcript(self, msg) -> str | None:
+        if msg["kind"] not in wa.SPEECH_KINDS:
+            return None
+        row = self.conn.execute("SELECT text FROM tr.transcripts WHERE id = ?",
+                                (msg["id"],)).fetchone()
+        return row[0] if row else None
+
     def pages(self, msg):
         if msg["kind"] != "document":
             return None
@@ -163,6 +170,9 @@ class Renderer:
         tag = self.media_tag(msg)
         label = st.bold(sender) + (" " + st.green(f"[{tag}]") if tag else "")
         text = msg.get("text") or ""
+        spoken = self.transcript(msg)
+        if spoken:
+            text = (text + "\n" if text else "") + "(transcript) " + spoken
         if text and not self.full and len(text) > 300:
             text = text[:300] + "..."
         text_lines = text.split("\n") if text else []
@@ -237,6 +247,9 @@ def to_json(msg, renderer: Renderer) -> dict:
             "pages": renderer.pages(msg),
             "exists": bool(path and os.path.exists(path)),
         }
+    spoken = renderer.transcript(msg)
+    if spoken:
+        out["transcript"] = spoken
     if msg.get("reply"):
         out["reply_to"] = msg["reply"]
     extra = msg.get("extra") or {}

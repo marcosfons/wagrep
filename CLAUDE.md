@@ -19,7 +19,7 @@ python3 -m unittest -q          # unit tests (tests/, stdlib unittest)
 - Point `WAGREP_CACHE` at a scratch directory to try schema or decoder changes
   without touching the real index in `~/.cache/wagrep`.
 
-## Layout (keep `src/` at 6 modules)
+## Layout (keep `src/` at 7 modules)
 
 | path | role |
 |---|---|
@@ -28,6 +28,7 @@ python3 -m unittest -q          # unit tests (tests/, stdlib unittest)
 | `src/content.py` | text extraction from attachments (PDF, Office, plain text) |
 | `src/search.py` | filters -> SQL, dates, loose/fuzzy matching, context, summaries, chat lookup |
 | `src/render.py` | compact text, JSON, CSV, budget fitting, summary text |
+| `src/transcribe.py` | voice note transcription: config, OpenAI-compatible API client, faster-whisper setup and the worker that runs inside its virtualenv |
 | `src/cli.py` | argparse, commands, logging, the agent output budget |
 | `wagrep` | launcher (resolves its symlink, imports `src.cli`) |
 | `tests/` | one file per module |
@@ -69,6 +70,18 @@ Windows, Web) produces the same message dicts and leaves the rest untouched.
   contentless trigram index with `detail=none`, used only as a prefilter;
   `search.text_clause` confirms with `LIKE` on `norm` or `docmatch` on the
   document. Measure with `dbstat` before adding columns or indexes.
+- **Transcription is explicit.** Only `wagrep transcribe ID...` may call a
+  backend: never from sync, search or a new voice note, because it costs time
+  or money. Transcripts live in `~/.local/share/wagrep/transcripts.db`
+  (attached as `tr`), never in the rebuildable index. The main program stays
+  standard-library only; faster-whisper lives in its own virtualenv and is
+  driven through `transcribe.py --worker`.
+- **Scope is a user preference.** `[scope]` (default, archived) and
+  `[chats]` (JID = all | skip | span) in `~/.config/wagrep/config.ini` decide
+  which messages enter the index (`index.chat_scopes`, applied in `sync` on
+  the signatures). A changed rule forces a full reconcile; pruning ends with a
+  VACUUM. Out-of-scope chats stay in `chats` (`since` = inf) so `-c` can
+  resolve them and print the `--keep` hint instead of an empty result.
 - **The index is a cache.** Schema change = edit `index.SCHEMA` and bump
   `SCHEMA_VERSION`; the next run rebuilds. No migrations.
 - **Output budget.** Anything that can print many rows respects

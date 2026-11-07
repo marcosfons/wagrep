@@ -92,6 +92,8 @@ class Query:
     edited: bool = False
     starred: bool = False
     expansions: dict = field(default_factory=dict)  # fuzzy term -> words
+    scope_hint: str | None = None   # shown when results may reach unindexed history
+    window_start: float | None = None  # where the default index window begins
 
     @property
     def has_text(self):
@@ -130,7 +132,7 @@ def _like(word: str) -> str:
 
 def text_clause(q: Query) -> tuple[str, list]:
     """SQL for the query's terms. Each term must appear in the message's
-    folded text (`m.norm`) or in its document; a trigram prefilter on `fts`
+    folded text (`m.norm`), its transcript or its document; a trigram prefilter on `fts`
     narrows the rows first whenever every needed term has trigrams."""
     if not q.terms:
         return "", []
@@ -142,13 +144,15 @@ def text_clause(q: Query) -> tuple[str, list]:
                 pattern, run = unaccent(term), None
             else:
                 pattern, run = _loose_pattern(t)
-            body, body_params = "regexp(?, m.norm)", [pattern]
+            body = "(regexp(?, m.norm) OR regexp(?, t.norm))"
+            body_params = [pattern, pattern]
             test = ["r", pattern]
             filters.append(_prefilter(run) if run else None)
         else:
             words = q.expansions.get(term) or [t]
-            body = "(" + " OR ".join(["m.norm LIKE ? ESCAPE '\\'"] * len(words)) + ")"
-            body_params = [_like(w) for w in words]
+            body = "(" + " OR ".join(["m.norm LIKE ? ESCAPE '\\'",
+                                      "t.norm LIKE ? ESCAPE '\\'"] * len(words)) + ")"
+            body_params = [_like(w) for w in words for _ in (0, 1)]
             test = ["s", words]
             parts = [_prefilter(w) for w in words]
             filters.append(None if None in parts
@@ -240,7 +244,8 @@ def where(q: Query) -> tuple[str, list]:
 
 
 def from_clause(q: Query) -> str:
-    join = " LEFT JOIN docs d ON d.id = m.id" if q.has_text else ""
+    join = (" LEFT JOIN docs d ON d.id = m.id"
+            " LEFT JOIN tr.transcripts t ON t.id = m.id") if q.has_text else ""
     return f"FROM msgs m{join}"
 
 

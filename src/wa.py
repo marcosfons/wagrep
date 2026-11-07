@@ -50,6 +50,7 @@ TYPES = {
 }
 MEDIA_KINDS = frozenset(
     ("image", "video", "audio", "document", "gif", "sticker", "video-note"))
+SPEECH_KINDS = frozenset(("audio", "video", "video-note"))
 # Business templates and bot menus keep their visible text inside the metadata
 # protobuf instead of ZTEXT, so it has to be harvested from there.
 PROTO_TEXT_KINDS = frozenset(("template", "interactive", "reply-button"))
@@ -367,15 +368,18 @@ def chat_kind(jid: str | None, session_type) -> str:
 
 def chats(conn: sqlite3.Connection) -> list[dict]:
     rows = conn.execute(
-        "SELECT Z_PK, ZPARTNERNAME, ZCONTACTJID, ZSESSIONTYPE, ZARCHIVED "
-        "FROM ZWACHATSESSION")
+        "SELECT Z_PK, ZPARTNERNAME, ZCONTACTJID, ZSESSIONTYPE, ZARCHIVED, "
+        "ZHIDDEN, ZREMOVED FROM ZWACHATSESSION")
+    # Hidden (locked) and removed chats are treated like archived ones.
     return [{"id": pk, "name": clean_name(name) or jid or "(unknown)", "jid": jid,
-             "kind": chat_kind(jid, stype), "archived": int(bool(archived))}
-            for pk, name, jid, stype, archived in rows]
+             "kind": chat_kind(jid, stype),
+             "archived": int(bool(archived or hidden or removed))}
+            for pk, name, jid, stype, archived, hidden, removed in rows]
 
 
-SIGNATURES = """
-SELECT m.Z_PK, m.Z_OPT, COALESCE(mi.Z_OPT, 0), COALESCE(i.Z_OPT, 0)
+SIGNATURES = f"""
+SELECT m.Z_PK, m.Z_OPT, COALESCE(mi.Z_OPT, 0), COALESCE(i.Z_OPT, 0),
+       m.ZCHATSESSION, m.ZMESSAGEDATE + {EPOCH}
   FROM ZWAMESSAGE m
   LEFT JOIN ZWAMEDIAITEM mi ON mi.Z_PK = m.ZMEDIAITEM
   LEFT JOIN ZWAMESSAGEINFO i ON i.Z_PK = m.ZMESSAGEINFO
@@ -383,11 +387,12 @@ SELECT m.Z_PK, m.Z_OPT, COALESCE(mi.Z_OPT, 0), COALESCE(i.Z_OPT, 0)
 """
 
 
-def signatures(conn, after_pk: int) -> dict[int, int]:
-    """Z_PK -> change counter. Core Data bumps Z_OPT on every row update, so
-    an edit, a reaction or a finished download changes the signature."""
-    return {pk: m + (mi << 20) + (i << 40)
-            for pk, m, mi, i in conn.execute(SIGNATURES, (after_pk,))}
+def signatures(conn, after_pk: int) -> dict[int, tuple]:
+    """Z_PK -> (change counter, chat id, unix time). Core Data bumps Z_OPT on
+    every row update, so an edit, a reaction or a finished download changes
+    the counter; chat and time let the index apply its scope rules."""
+    return {pk: (m + (mi << 20) + (i << 40), chat, ts)
+            for pk, m, mi, i, chat, ts in conn.execute(SIGNATURES, (after_pk,))}
 
 
 ROWS = f"""

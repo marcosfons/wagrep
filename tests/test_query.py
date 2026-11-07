@@ -19,6 +19,8 @@ class Query(unittest.TestCase):
     def setUp(self):
         self.conn = sqlite3.connect(":memory:")
         self.conn.executescript(index.SCHEMA)
+        self.conn.execute("ATTACH DATABASE ':memory:' AS tr")
+        self.conn.executescript(index.TRANSCRIPTS_SCHEMA)
         search.register(self.conn)
         for pk, ts, chat, sender, kind, text, filename, extra in ROWS:
             msg = {"text": text, "filename": filename, "extra": extra}
@@ -33,6 +35,9 @@ class Query(unittest.TestCase):
         self.conn.execute("INSERT INTO docs VALUES (3, 'ok', 2, 23, ?)",
                           (zlib.compress(b"Flight LA-3021 seat 14C"),))
         self.conn.row_factory = sqlite3.Row
+
+    def tearDown(self):
+        self.conn.close()
 
     def ids(self, **kw):
         rows, total = search.run(self.conn, search.Query(**kw), 0)
@@ -58,6 +63,12 @@ class Query(unittest.TestCase):
         self.assertEqual(self.ids(senders=["ana"]), [1])  # system row hidden
         self.assertEqual(self.ids(chat_ids=[2], since=3500), [4])
         self.assertEqual(search.count(self.conn, search.Query(kinds=["system"])), 1)
+
+    def test_transcripts_are_searched(self):
+        self.conn.execute("INSERT INTO msgs (id, ts, chat_id, sender, kind) "
+                          "VALUES (6, 6000, 1, 'Bruno', 'audio')")
+        index.save_transcript(self.conn, 6, {"text": "Chego às três da tarde"}, "api", 1.0)
+        self.assertEqual(self.ids(terms=["tres da tarde"]), [6])
 
     def test_summary_and_context(self):
         s = search.summary(self.conn, search.Query(chat_ids=[1]))

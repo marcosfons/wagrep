@@ -1,5 +1,4 @@
 import datetime as dt
-import json
 import unittest
 
 from src import search
@@ -66,7 +65,8 @@ class TextClause(unittest.TestCase):
                          expansions={"churasco": ["churasco", "churrasco"]})
         sql, params = search.text_clause(q)
         self.assertIn(") OR (", params[0])
-        self.assertEqual(params[1:3], ["%churasco%", "%churrasco%"])
+        self.assertEqual(params[1:5], ["%churasco%", "%churasco%",
+                                       "%churrasco%", "%churrasco%"])
 
 
 class SqlFunctions(unittest.TestCase):
