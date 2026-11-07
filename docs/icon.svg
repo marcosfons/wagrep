@@ -1,0 +1,50 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <!-- wagrep icon: a glowing lens finding one line of a chat bubble.
+       Same language as drake's icon: near-black squircle body, one glowing
+       gradient mark, one quiet grey outline. -->
+  <defs>
+    <linearGradient id="body" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#26262b"/>
+      <stop offset="1" stop-color="#0b0b0d"/>
+    </linearGradient>
+    <linearGradient id="rim" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffffff" stop-opacity="0.14"/>
+      <stop offset="1" stop-color="#ffffff" stop-opacity="0.02"/>
+    </linearGradient>
+    <linearGradient id="mark" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#8af7bd"/>
+      <stop offset="0.55" stop-color="#25d488"/>
+      <stop offset="1" stop-color="#0f9f6e"/>
+    </linearGradient>
+    <filter id="glow" x="-60%" y="-60%" width="220%" height="220%">
+      <feGaussianBlur stdDeviation="34"/>
+    </filter>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="150%">
+      <feDropShadow dx="0" dy="22" stdDeviation="26" flood-color="#000" flood-opacity="0.45"/>
+    </filter>
+  </defs>
+
+  <rect x="100" y="100" width="824" height="824" rx="186" fill="url(#body)" filter="url(#shadow)"/>
+  <rect x="103" y="103" width="818" height="818" rx="183" fill="none" stroke="url(#rim)" stroke-width="6"/>
+
+  <!-- chat bubble outline with two grey lines and the matched line -->
+  <path d="M500 410 H736 A72 72 0 0 1 808 482 V664 A72 72 0 0 1 736 736 H572 L466 812 L478 732
+           A72 72 0 0 1 428 664 V482 A72 72 0 0 1 500 410 Z"
+        fill="none" stroke="#5f5f66" stroke-width="30" stroke-linejoin="round"/>
+  <line x1="512" y1="512" x2="724" y2="512" stroke="#3d3d43" stroke-width="30" stroke-linecap="round"/>
+  <line x1="512" y1="634" x2="660" y2="634" stroke="#3d3d43" stroke-width="30" stroke-linecap="round"/>
+
+  <!-- glow behind the lens -->
+  <g filter="url(#glow)" opacity="0.6">
+    <circle cx="378" cy="378" r="150" fill="none" stroke="#25d488" stroke-width="60"/>
+    <line x1="490" y1="490" x2="590" y2="590" stroke="#25d488" stroke-width="70" stroke-linecap="round"/>
+  </g>
+
+  <!-- the lens -->
+  <circle cx="378" cy="378" r="150" fill="url(#mark)" fill-opacity="0.16"/>
+  <line x1="290" y1="378" x2="466" y2="378" stroke="url(#mark)" stroke-width="30" stroke-linecap="round" opacity="0.9"/>
+  <circle cx="378" cy="378" r="150" fill="none" stroke="url(#mark)" stroke-width="56"/>
+  <line x1="494" y1="494" x2="586" y2="586" stroke="url(#mark)" stroke-width="66" stroke-linecap="round"/>
+  <path d="M296 300 A116 116 0 0 1 380 262" fill="none" stroke="#ffffff" stroke-opacity="0.45"
+        stroke-width="16" stroke-linecap="round"/>
+</svg>
