@@ -72,6 +72,17 @@ class Query(unittest.TestCase):
         index.save_transcript(self.conn, 6, {"text": "Chego às três da tarde"}, "api", 1.0)
         self.assertEqual(self.ids(terms=["tres da tarde"]), [6])
 
+    def test_chat_names_match_without_punctuation(self):
+        self.conn.execute("INSERT INTO chats (id, name, norm) VALUES (3, ?, ?)",
+                          ("SCHOOL'S 📚", index.fold("SCHOOL'S 📚")))
+        chats, fuzzy = search.find_chats(self.conn, ["schools"])
+        self.assertEqual(([c[0] for c in chats], fuzzy), ([3], False))
+
+    def test_hidden_chats_only_when_named(self):
+        self.conn.execute("INSERT INTO chats (id, name, hidden) VALUES (2, 'Muted', 1)")
+        self.assertEqual(self.ids(terms=["sitio"]), [])
+        self.assertEqual(self.ids(terms=["sitio"], chat_ids=[2]), [4])
+
     def test_summary_and_context(self):
         s = search.summary(self.conn, search.Query(chat_ids=[1]))
         self.assertEqual(s["total"], 2)

@@ -300,6 +300,10 @@ def cmd_search(args) -> int:
                     and q.since < q.window_start)
     if q.scope_hint and (not rows or (len(rows) == total and (q.chat_ids or reaches_back))):
         note(q.scope_hint)
+    if not rows and q.chat_ids is None:
+        hidden = conn.execute("SELECT COUNT(*) FROM chats WHERE hidden = 1").fetchone()[0]
+        if hidden:
+            note(f"{hidden} hidden chats (muted) were not searched; name one with -c")
     if not rows:
         note("no matches" + (" (in " + ", ".join(
             r[0] for r in conn.execute(
@@ -433,7 +437,7 @@ def extract(msgs, dest) -> int:
 
 def cmd_chats(args) -> int:
     conn = open_index(args)
-    if args.keep or args.skip or args.reset:
+    if args.keep or args.skip or args.hide or args.reset:
         return set_scope(conn, args)
     counts = {cid: (n, last) for cid, n, last in conn.execute(
         "SELECT chat_id, COUNT(*), MAX(ts) FROM msgs WHERE kind != 'system' "
@@ -464,7 +468,8 @@ def set_scope(conn, args) -> int:
         raise search.QueryError(
             f"{len(chats)} chats match, be more specific: "
             + ", ".join(c[1] for c in chats[:8]))
-    rule = "skip" if args.skip else args.span if args.keep else None
+    rule = ("skip" if args.skip else "hide" if args.hide
+            else args.span if args.keep else None)
     if rule:
         try:
             index.parse_span(rule)
@@ -687,7 +692,7 @@ def cmd_stats(args) -> int:
 
 
 def cmd_index(args) -> int:
-    for key in ("default", "archived"):
+    for key in ("default", "archived", "muted"):
         value = getattr(args, key)
         if value:
             try:
@@ -721,9 +726,11 @@ def cmd_index(args) -> int:
     kept = conn.execute("SELECT COUNT(*) FROM chats WHERE since IS NULL").fetchone()[0]
     skipped = conn.execute(
         "SELECT COUNT(*) FROM chats WHERE since > 1e300").fetchone()[0]
-    print(f"scope:     default {scope.get('default', 'all')}, archived "
-          f"{scope.get('archived', scope.get('default', 'all'))}; {kept} chats in full, "
-          f"{skipped} not indexed (wagrep chats --keep/--skip NAME)")
+    hidden = conn.execute("SELECT COUNT(*) FROM chats WHERE hidden = 1").fetchone()[0]
+    default = scope.get("default", "all")
+    print(f"scope:     default {default}, archived {scope.get('archived', default)}, "
+          f"muted {scope.get('muted', default)}; {kept} chats in full, {skipped} not "
+          f"indexed, {hidden} hidden (wagrep chats --keep/--hide/--skip NAME)")
     print(f"config:    {index.CONFIG}")
     print(f"log:       {LOG_FILE}")
     return 0
@@ -831,6 +838,8 @@ SCOPE
   a search reaches outside it, stderr says so and gives the command, e.g.
   wagrep chats --keep NAME [--span 1y]. Run it when the user wants that
   chat's older messages; wagrep chats lists each chat's scope.
+  Hidden chats (scope "hide", e.g. muted groups) are skipped by searches
+  unless named with -c/-x; search them only when the user asks.
 
 LIMITS
   Read-only snapshot of WhatsApp Desktop (macOS). Cannot send or modify.
@@ -867,6 +876,8 @@ def subparsers(common, filters):
                    help="index its history: all, or --span 1y")
     g.add_argument("--span", default="all", help="with --keep: all, 60d, 6m, 1y, ...")
     g.add_argument("--skip", action="store_true", help="never index it")
+    g.add_argument("--hide", action="store_true",
+                   help="index it, but search it only when named with -c/-x")
     g.add_argument("--reset", action="store_true", help="back to the default scope")
     for name, help_text in (("open", "open attachments with the default app"),
                             ("path", "print absolute paths of attachments"),
@@ -904,8 +915,11 @@ def subparsers(common, filters):
     i.add_argument("--rebuild", action="store_true", help="drop and rebuild")
     i.add_argument("--default", metavar="SPAN",
                    help="history to index for chats without a rule: all, 60d, 6m, 1y")
-    i.add_argument("--archived", metavar="SPAN",
-                   help="same for archived/hidden chats: skip, all or a span")
+    i.add_argument("--archived", metavar="RULE",
+                   help="archived/locked chats: skip, hide, all or a span")
+    i.add_argument("--muted", metavar="RULE",
+                   help="muted chats: hide (indexed, searched only when named "
+                        "with -c/-x), skip, all or a span")
     p["guide"] = make("guide", "reference for agents")
     return p
 

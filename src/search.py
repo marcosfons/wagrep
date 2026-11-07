@@ -209,6 +209,8 @@ def where(q: Query) -> tuple[str, list]:
     clauses, params = [], []
     if q.chat_ids is not None:
         clauses.append(f"m.chat_id IN ({','.join(map(str, q.chat_ids))})")
+    else:
+        clauses.append("m.chat_id NOT IN (SELECT id FROM chats WHERE hidden = 1)")
     if q.since is not None:
         clauses.append("m.ts >= ?")
         params.append(q.since)
@@ -406,6 +408,10 @@ def find_chats(conn, patterns: list[str]) -> tuple[list, bool]:
 
 def _contains(chat, pattern: str) -> bool:
     if pattern in chat[4] or (chat[2] and pattern in chat[2]):
+        return True
+    # Names are full of punctuation and emoji: "schools" finds SCHOOL'S.
+    squashed = re.sub(r"[\W_]", "", pattern)
+    if len(squashed) >= 3 and squashed in re.sub(r"[\W_]", "", chat[4]):
         return True
     if pattern.isdigit() and len(pattern) >= 4:
         digits = re.sub(r"\D", "", chat[1] + (chat[2] or "").split("@")[0])

@@ -367,14 +367,19 @@ def chat_kind(jid: str | None, session_type) -> str:
 
 
 def chats(conn: sqlite3.Connection) -> list[dict]:
+    # ZMUTEDUNTIL is a Core Data date; "muted forever" is the year 4001.
     rows = conn.execute(
-        "SELECT Z_PK, ZPARTNERNAME, ZCONTACTJID, ZSESSIONTYPE, ZARCHIVED, "
-        "ZHIDDEN, ZREMOVED FROM ZWACHATSESSION")
+        "SELECT cs.Z_PK, cs.ZPARTNERNAME, cs.ZCONTACTJID, cs.ZSESSIONTYPE, "
+        "cs.ZARCHIVED, cs.ZHIDDEN, cs.ZREMOVED, "
+        "MAX(COALESCE(p.ZMUTEDUNTIL, 0)) > strftime('%s', 'now') - ? "
+        "FROM ZWACHATSESSION cs LEFT JOIN ZWACHATPUSHCONFIG p ON p.ZJID = cs.ZCONTACTJID "
+        "GROUP BY cs.Z_PK", (EPOCH,))
     # Hidden (locked) and removed chats are treated like archived ones.
     return [{"id": pk, "name": clean_name(name) or jid or "(unknown)", "jid": jid,
              "kind": chat_kind(jid, stype),
-             "archived": int(bool(archived or hidden or removed))}
-            for pk, name, jid, stype, archived, hidden, removed in rows]
+             "archived": int(bool(archived or hidden or removed)),
+             "muted": int(bool(muted))}
+            for pk, name, jid, stype, archived, hidden, removed, muted in rows]
 
 
 SIGNATURES = f"""

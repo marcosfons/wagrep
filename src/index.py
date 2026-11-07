@@ -46,7 +46,7 @@ CREATE TABLE IF NOT EXISTS tr.transcripts(
   text TEXT, norm TEXT, language TEXT, confidence REAL,
   backend TEXT, model TEXT, took REAL, created REAL);
 """
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 # Re-check this many of the newest rows on every sync (edits, reactions and
 # downloads mostly touch recent messages); everything else every FULL_EVERY.
 RECENT_ROWS = 20000
@@ -63,8 +63,9 @@ SCHEMA = f"""
 CREATE TABLE meta(k TEXT PRIMARY KEY, v);
 CREATE TABLE chats(id INTEGER PRIMARY KEY, name TEXT, jid TEXT, kind TEXT,
                    archived INT, norm TEXT,
-                   scope TEXT,       -- rule label: all, skip, 60d, 1y, ...
-                   since REAL);      -- oldest indexed time; NULL = everything
+                   scope TEXT,       -- rule label: all, skip, hide, 60d, 1y, ...
+                   since REAL,       -- oldest indexed time; NULL = everything
+                   hidden INT);      -- left out of searches unless named (-c/-x)
 CREATE TABLE msgs(
   id INTEGER PRIMARY KEY,           -- ZWAMESSAGE.Z_PK
   sig INTEGER,                      -- Core Data change counters
@@ -128,31 +129,41 @@ def save_config(section: str, values: dict):
 
 
 def parse_span(text: str) -> float | str:
-    """"all", "skip", or a span like 60d / 2w / 6m / 1y in seconds."""
+    """"all", "skip", "hide", or a span like 60d / 2w / 6m / 1y in seconds."""
     value = text.strip().lower()
-    if value in ("all", "skip"):
+    if value in ("all", "skip", "hide"):
         return value
     match = _SPAN.match(value)
     if not match:
-        raise ValueError(f"{text!r} is not all, skip or a span like 60d, 6m, 1y")
+        raise ValueError(f"{text!r} is not all, skip, hide or a span like 60d, 6m, 1y")
     return int(match.group(1)) * _SPAN_SECONDS[match.group(2)]
 
 
 def chat_scopes(chats: list[dict], now: float) -> dict[int, tuple]:
-    """chat id -> (rule label, oldest time to index: None = all, inf = none).
+    """chat id -> (rule label, oldest time to index, hidden).
 
-    A rule for the chat in [chats] wins; otherwise archived chats follow
-    [scope] archived and the rest [scope] default. Both default to all."""
+    The time is None for everything and inf for nothing. A rule for the chat
+    in [chats] wins; then [scope] archived for archived chats, [scope] muted
+    for muted ones, and [scope] default for the rest (default: all). "hide"
+    indexes a chat like the default but leaves it out of searches that do
+    not name it."""
     scope = load_config("scope")
     rules = load_config("chats")
     default = scope.get("default", "all")
-    archived = scope.get("archived", default)
+    if parse_span(default) == "hide":
+        raise ValueError("[scope] default cannot be hide")
     out = {}
     for chat in chats:
-        label = rules.get(chat["jid"] or "") or (archived if chat["archived"] else default)
+        label = (rules.get(chat["jid"] or "")
+                 or (chat["archived"] and scope.get("archived"))
+                 or (chat.get("muted") and scope.get("muted"))
+                 or default).strip().lower()
         span = parse_span(label)
+        hidden = span == "hide"
+        if hidden:
+            span = parse_span(default)
         since = None if span == "all" else float("inf") if span == "skip" else now - span
-        out[chat["id"]] = (label.strip().lower(), since)
+        out[chat["id"]] = (label, since, int(hidden))
     return out
 
 
@@ -313,7 +324,7 @@ def sync(conn, sig, full=False, progress=False, doc_budget=2.0):
             # Scope changed: reconcile everything (backfill or prune).
             full, after = True, 0
         src_sigs = {pk: sig for pk, (sig, chat, ts) in wa.signatures(src, after).items()
-                    if ts >= (scopes.get(chat, (None, None))[1] or 0)}
+                    if ts >= (scopes.get(chat, (None, None, 0))[1] or 0)}
         idx_sigs = dict(conn.execute(
             "SELECT id, sig FROM msgs WHERE id > ?", (after,)))
         changed = [pk for pk, s in src_sigs.items() if idx_sigs.get(pk) != s]
@@ -322,7 +333,7 @@ def sync(conn, sig, full=False, progress=False, doc_budget=2.0):
         with conn:
             conn.execute("DELETE FROM chats")
             conn.executemany(
-                "INSERT INTO chats VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO chats VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 [(c["id"], c["name"], c["jid"], c["kind"], c["archived"],
                   fold(c["name"]), *scopes[c["id"]]) for c in chats])
             for chunk in _chunks(deleted, 500):

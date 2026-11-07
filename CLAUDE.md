@@ -77,12 +77,15 @@ Windows, Web) produces the same message dicts and leaves the rest untouched.
   (attached as `tr`), never in the rebuildable index. The main program stays
   standard-library only; faster-whisper lives in its own virtualenv and is
   driven through `transcribe.py --worker`.
-- **Scope is a user preference.** `[scope]` (default, archived) and
-  `[chats]` (JID = all | skip | span) in `~/.config/wagrep/config.ini` decide
+- **Scope is a user preference.** `[scope]` (default, archived, muted) and
+  `[chats]` (JID = all | skip | hide | span) in `~/.config/wagrep/config.ini` decide
   which messages enter the index (`index.chat_scopes`, applied in `sync` on
   the signatures). A changed rule forces a full reconcile; pruning ends with a
   VACUUM. Out-of-scope chats stay in `chats` (`since` = inf) so `-c` can
   resolve them and print the `--keep` hint instead of an empty result.
+  `hide` indexes a chat like the default but `search.where` leaves it out
+  unless `-c`/`-x` names it. Muted = `ZWACHATPUSHCONFIG.ZMUTEDUNTIL` in the
+  future ("forever" is the year 4001).
 - **The index is a cache.** Schema change = edit `index.SCHEMA` and bump
   `SCHEMA_VERSION`; the next run rebuilds. No migrations.
 - **Output budget.** Anything that can print many rows respects

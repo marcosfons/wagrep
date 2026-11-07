@@ -109,6 +109,7 @@ wagrep index --default 60d --archived skip   # last 2 months, archived chats out
 wagrep chats --keep "Ana"                    # this chat's full history
 wagrep chats --keep "Book club" --span 1y    # or a year of it
 wagrep chats --skip "Promotions"             # never index this one
+wagrep index --muted hide                    # muted chats: searched only when named (-c)
 ```
 
 That brought one real index from 104 MB to 26 MB. Rules live in

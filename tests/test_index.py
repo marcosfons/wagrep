@@ -24,7 +24,7 @@ class Scope(unittest.TestCase):
 
     def test_everything_is_indexed_without_a_config(self):
         scopes = index.chat_scopes([{"id": 1, "jid": "a@s", "archived": 1}], 1000.0)
-        self.assertEqual(scopes, {1: ("all", None)})
+        self.assertEqual(scopes, {1: ("all", None, 0)})
 
     def test_chat_rule_beats_archived_beats_default(self):
         index.save_config("scope", {"default": "10d", "archived": "skip"})
@@ -36,10 +36,19 @@ class Scope(unittest.TestCase):
                  {"id": 4, "jid": "old@g.us", "archived": 0}]
         now = 100 * 86400.0
         scopes = index.chat_scopes(chats, now)
-        self.assertEqual(scopes[1], ("all", None))
-        self.assertEqual(scopes[2], ("skip", float("inf")))
-        self.assertEqual(scopes[3], ("10d", now - 10 * 86400))
+        self.assertEqual(scopes[1], ("all", None, 0))
+        self.assertEqual(scopes[2], ("skip", float("inf"), 0))
+        self.assertEqual(scopes[3], ("10d", now - 10 * 86400, 0))
         self.assertEqual(scopes[4][0], "1y")
+
+    def test_muted_chats_can_be_hidden_but_stay_indexed(self):
+        index.save_config("scope", {"default": "60d", "muted": "hide", "archived": "skip"})
+        now = 100 * 86400.0
+        scopes = index.chat_scopes([
+            {"id": 1, "jid": "a@g.us", "archived": 0, "muted": 1},
+            {"id": 2, "jid": "b@g.us", "archived": 1, "muted": 1}], now)
+        self.assertEqual(scopes[1], ("hide", now - 60 * 86400, 1))
+        self.assertEqual(scopes[2][:2], ("skip", float("inf")))  # archived wins
 
 
 if __name__ == "__main__":
